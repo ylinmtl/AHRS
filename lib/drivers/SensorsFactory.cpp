@@ -1,4 +1,9 @@
 #include "SensorsFactory.h"
-std::unique_ptr<SensorHub> SensorsFactory::create(BusI2C& bus) {
-    return std::unique_ptr<SensorHub>(new SensorHub(bus));
+
+/**
+ * @brief Construct a SensorHub using the provided Bus.
+ *        Caller owns the Bus lifetime (typically a global/static in main).
+ */
+std::unique_ptr<SensorHub> SensorsFactory::create(Bus& bus) {
+    return std::make_unique<SensorHub>(bus);
 }

@@ -1,34 +1,80 @@
-#include "LPS25H.h"
+#include "LPS25H.h"                                   // Include matching header
 
-static constexpr uint8_t WHO_AM_I     = 0x0F; // expect 0xBD
-static constexpr uint8_t CTRL_REG1    = 0x20;
-static constexpr uint8_t PRESS_OUT_XL = 0x28; // 24-bit P
-static constexpr uint8_t TEMP_OUT_L   = 0x2B; // 16-bit T
+// ---- Low-level helpers ------------------------------------------------------
+
+bool LPS25H::writeReg(uint8_t reg, uint8_t val) {
+    // Write a single register via the shared Bus.
+    return bus_.writeRegister(addrActive_ ? addrActive_ : addrPrimary_, reg, val);
+}
+
+bool LPS25H::readRegs(uint8_t startReg, uint8_t* buf, size_t len) {
+    // Use auto-increment (0x80) for multi-byte reads (per ST convention).
+    return bus_.readRegisters(addrActive_ ? addrActive_ : addrPrimary_, (uint8_t)(startReg | 0x80), buf, len);
+}
+
+bool LPS25H::readByte(uint8_t reg, uint8_t& val) {
+    // Read a single byte into 'val'.
+    return bus_.readRegisters(addrActive_ ? addrActive_ : addrPrimary_, reg, &val, 1);
+}
+
+// Probe primary, then alternate; validate WHO_AM_I.
+bool LPS25H::probeAndSelectAddress() {
+    uint8_t who = 0;                                  // WHO_AM_I value holder
+    addrActive_ = 0;                                  // Clear active until we know
+
+    // Try primary address first
+    addrActive_ = addrPrimary_;                       // Tentatively set to primary
+    if (readByte(REG_WHO_AM_I, who) && who == kWhoAmI) {
+        return true;                                  // Primary responded with expected ID
+    }
+
+    // Try alternate address
+    addrActive_ = addrAlt_;                           // Switch to alternate
+    if (readByte(REG_WHO_AM_I, who) && who == kWhoAmI) {
+        return true;                                  // Alternate responded
+    }
+
+    // Neither address worked
+    addrActive_ = 0;                                  // Mark invalid
+    return false;                                     // Probe failed
+}
+
+// ---- Public API -------------------------------------------------------------
 
 bool LPS25H::begin() {
-    uint8_t id=0;
-    if (!readRegs(WHO_AM_I, &id, 1)) return false;
-    if (id != 0xBD) return false;
-    // CTRL_REG1: PD=1 (bit7), ODR=25Hz (100<<4), BDU=1 (bit2) -> 0xC4
-    if (!writeReg(CTRL_REG1, 0xC4)) return false;
-    return true;
+    // Determine which address is present by checking WHO_AM_I.
+    if (!probeAndSelectAddress()) {                   // Abort if no device responds properly
+        return false;
+    }
+
+    // CTRL1: PD=1 (power on), ODR=25 Hz (bits 6:4 = 011), BDU=1 (bit2) -> 0xB4
+    if (!writeReg(REG_CTRL1, 0xB4)) return false;    // Enable device, set ODR, and latch data until full read
+
+    // (Optional) Additional configuration (resolution, FIFO) can be set here if needed.
+
+    return true;                                      // Initialization done
 }
 
 bool LPS25H::read(float& pressure_Pa, float& temp_C) {
-    uint8_t buf[5];
-    if (!readRegs(PRESS_OUT_XL | 0x80, buf, 5)) return false;
-    int32_t p24 = (int32_t)((int32_t)buf[2] << 16 | (int32_t)buf[1] << 8 | buf[0]);
-    if (p24 & 0x00800000) p24 |= 0xFF000000; // sign extend if needed
-    int16_t t16 = (int16_t)((int16_t)buf[4] << 8 | buf[3]);
-    float p_hPa = (float)p24 / 4096.0f;
-    pressure_Pa = p_hPa * 100.0f;
-    temp_C = 42.5f + ((float)t16 / 480.0f);
-    return true;
-}
+    uint8_t buf[5];                                   // Buffer: P[0..2], T[3..4]
+    if (!readRegs(REG_PRESS_OUT_XL, buf, sizeof(buf))) {
+        return false;                                 // Abort on I²C error
+    }
 
-bool LPS25H::writeReg(uint8_t reg, uint8_t val) {
-    return bus_.write(addr_, reg, &val, 1);
-}
-bool LPS25H::readRegs(uint8_t startReg, uint8_t* buf, size_t len) {
-    return bus_.read(addr_, startReg, buf, len);
+    // Pressure is 24-bit unsigned, little endian: XL, L, H
+    uint32_t p_raw = (uint32_t)buf[0]                 // XL
+                   | ((uint32_t)buf[1] << 8)          // L
+                   | ((uint32_t)buf[2] << 16);        // H
+
+    // Temperature is 16-bit signed, little endian: L, H
+    int16_t t_raw = (int16_t)((buf[4] << 8) | buf[3]); // Pack T as signed value
+
+    // Convert to physical units per datasheet:
+    //  Pressure in hPa = p_raw / 4096; 1 hPa = 100 Pa  => Pa = (p_raw / 4096) * 100
+    pressure_Pa = (p_raw / 4096.0f) * 100.0f;         // Output pressure in pascal
+
+    //  Temperature in °C = 42.5 + t_raw / 480
+    temp_C = 42.5f + (t_raw / 480.0f);                // Output temperature in Celsius
+
+    return true;                                      // Completed successfully
 }

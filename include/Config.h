@@ -1,39 +1,41 @@
 #pragma once
-#include <stdint.h>
+#include <Arduino.h>
 
-// Global config & build-time sensor selection.
+/**
+ * @file Config.h
+ * @brief Central build-time configuration for the AHRS sensor layer.
+ *
+ * Keep this file minimal. Devices probe their own I2C addresses (primary → alternate),
+ * so we do NOT carry per-device address constants here anymore.
+ */
 namespace Config {
 
-// I2C speed
-static constexpr unsigned I2C_CLOCK_HZ = 400000; // 400 kHz
+    /**
+     * @brief I2C clock frequency in Hz for the shared bus.
+     * Teensy/Arduino Wire typically supports 100 kHz, 400 kHz, 1 MHz (board-dependent).
+     */
+    static constexpr unsigned I2C_CLOCK_HZ = 400000U;
 
-// Enable flags
-namespace Enable {
-    static constexpr bool MPU9150 = 0; // set true to use MPU9150 combo IMU
+    /**
+     * @brief Enable/disable drivers at build time.
+     * At runtime, each enabled driver is probed (WHO_AM_I). Only present devices are used.
+     */
+    namespace Enable {
+        static constexpr bool MPU9150 = 1;  // InvenSense IMU + internal AK8975 mag
+        static constexpr bool L3GD20H = 0;  // ST gyro
+        static constexpr bool LSM303D = 0;  // ST accel + mag
+        static constexpr bool LPS25H  = 0;  // ST baro + temp
+    }
 
-    // ST discrete sensors
-    static constexpr bool L3GD20H = 1;  // Gyro
-    static constexpr bool LSM303D = 1;  // Accel + Mag
-    static constexpr bool LPS25H  = 1;  // Baro + Temp
+    /**
+     * @brief Source preferences when multiple devices can provide the same quantity.
+     * Runtime selection also considers actual device presence.
+     */
+    namespace Select {
+        static constexpr bool PreferExternalGyro  = false; // true -> choose L3GD20H over MPU9150 gyro when both are present
+        static constexpr bool PreferExternalAccel = false; // true -> choose LSM303D over MPU9150 accel when both are present
+        static constexpr bool PreferExternalMag   = false; // true -> choose LSM303D over MPU9150 mag when both are present
+        // Temperature preference is implicit: prefer baro ambient (LPS25H) when present,
+        // otherwise fall back to IMU die temp (MPU9150).
+    }
 }
-
-// I2C addresses
-namespace Addr {
-    // InvenSense
-    static constexpr uint8_t MPU9150 = 0x68; // AD0=0
-    static constexpr uint8_t AK8975  = 0x0C; // behind MPU master
-
-    // ST
-    static constexpr uint8_t L3GD20H = 0x6B; // SA0=1
-    static constexpr uint8_t LSM303D = 0x1D; // SA0=1
-    static constexpr uint8_t LPS25H  = 0x5D; // SA0=1
-}
-
-// Source preferences when multiple are enabled
-namespace Select {
-    static constexpr bool PreferExternalGyro  = true;
-    static constexpr bool PreferExternalAccel = true;
-    static constexpr bool PreferExternalMag   = true;
-}
-
-} // namespace Config

@@ -1,66 +1,64 @@
 #include "SensorHub.h"
 
 /**
- * @brief Store the shared bus and defer device construction to begin().
+ * @brief Store the bus reference. Device instances are created in begin() so
+ *        they can honor Config::Enable and we fail fast if probing fails.
  */
-SensorHub::SensorHub(BusI2C& bus) : bus_(bus) {}
+SensorHub::SensorHub(Bus& bus) : bus_(bus) {}
 
 /**
- * @brief Probe and initialize enabled devices, then choose data sources.
+ * @brief Instantiate/probe enabled devices, select sources, and establish hub rate.
  */
 bool SensorHub::begin() {
-    // Instantiate per Config (kept modular for future SPI/mocks)
-    if (Config::Enable::MPU9150) mpu9150_.reset(new MPU9150(bus_, Config::Addr::MPU9150, Config::Addr::AK8975));
-    if (Config::Enable::L3GD20H) l3gd20h_.reset(new L3GD20H(bus_, Config::Addr::L3GD20H));
-    if (Config::Enable::LSM303D) lsm303d_.reset(new LSM303D(bus_, Config::Addr::LSM303D));
-    if (Config::Enable::LPS25H)  lps25h_.reset (new LPS25H (bus_, Config::Addr::LPS25H));
+    // Construct enabled drivers (probing happens in each begin()).
+    if (Config::Enable::MPU9150) mpu9150_ = std::make_unique<MPU9150>(bus_, 0x68, 0x0C); // MPU @0x68, AK8975 @0x0C
+    if (Config::Enable::L3GD20H) l3gd20h_ = std::make_unique<L3GD20H>(bus_);
+    if (Config::Enable::LSM303D) lsm303d_ = std::make_unique<LSM303D>(bus_);
+    if (Config::Enable::LPS25H)  lps25h_  = std::make_unique<LPS25H >(bus_);
 
-    bool any = false;
-    if (mpu9150_) any |= mpu9150_->begin();
-    if (l3gd20h_) any |= l3gd20h_->begin();
-    if (lsm303d_) any |= lsm303d_->begin();
-    if (lps25h_)  any |= lps25h_->begin();
+    // Probe/init each device; ignore absent hardware (driver begin() returns false).
+    if (mpu9150_ && !mpu9150_->begin()) mpu9150_.reset();
+    if (l3gd20h_ && !l3gd20h_->begin()) l3gd20h_.reset();
+    if (lsm303d_ && !lsm303d_->begin()) lsm303d_.reset();
+    if (lps25h_  && !lps25h_ ->begin()) lps25h_ .reset();
 
-    // Choose sources
+    // Choose a source for each quantity based on presence + preferences.
     chooseGyroSource();
     chooseAccelSource();
     chooseMagSource();
     chooseBaroSource();
     chooseTempSource();
 
-    // Establish hub sample rate from the selected gyro
-    if (gyroSrc_ == GyroSrc::MPU9150 && mpu9150_) {
-        sampleRateHz_ = mpu9150_->sampleRateHz();
-    } else if (gyroSrc_ == GyroSrc::L3GD20H && l3gd20h_) {
-        sampleRateHz_ = l3gd20h_->getSampleRateHz();
-    } else {
-        sampleRateHz_ = 800.0f; // sane default
-    }
+    // Mirror selected gyro's rate for hub pacing.
+    if (gyroSrc_ == GyroSrc::MPU9150 && mpu9150_)      sampleRateHz_ = mpu9150_->sampleRateHz();
+    else if (gyroSrc_ == GyroSrc::L3GD20H && l3gd20h_) sampleRateHz_ = l3gd20h_->getSampleRateHz();
+    else                                               sampleRateHz_ = 800.0f;
 
-    // Require a valid gyro source
+    // Require a valid gyro source for meaningful operation.
     return (gyroSrc_ != GyroSrc::None);
 }
 
 /**
- * @brief Read selected sources once per loop and fan out to the scaled struct.
- *
- * Notes:
- * - We call MPU9150::read() at most once per loop even if multiple quantities
- *   (gyro/accel/mag/temp) come from it.
- * - If LPS25H is present, its temperature is treated as ambient and preferred.
- *   Otherwise we fall back to the IMU die temperature from MPU9150.
+ * @brief Read the selected sources and fan out into a single scaled struct.
+ *        Ensures MPU9150::read() is called at most once per loop even if it
+ *        supplies multiple quantities (gyro, accel, mag, temp).
  */
 bool SensorHub::read(SensorScaled& out) {
-    bool ok = true;
-    bool mpuRead = false;
+    bool ok = true;              // Accumulates overall success
+    bool mpuRead = false;        // Tracks whether we already called mpu9150_->read()
 
-    // Zero/keep prior values where appropriate. Pressure/Temp default to NaN to make "not available"
-    // explicit. Change to 0 if you prefer zeros.
+    // Initialize "optional" channels to NAN so missing sensors are explicit.
     out.pressure_Pa   = NAN;
     out.temperature_C = NAN;
 
-    // ---- Gyro & Accel (and IMU temp) from MPU9150 if selected ----
-    if ((gyroSrc_ == GyroSrc::MPU9150) || (accelSrc_ == AccelSrc::MPU9150) || (magSrc_ == MagSrc::MPU9150) || (tempSrc_ == TempSrc::MPU9150)) {
+    // ----- Any dependence on MPU9150? Call read() once then scatter results. -----
+    const bool needMPU =
+        (gyroSrc_ == GyroSrc::MPU9150) ||
+        (accelSrc_ == AccelSrc::MPU9150) ||
+        (magSrc_  == MagSrc::MPU9150)  ||
+        (tempSrc_ == TempSrc::MPU9150);
+
+    if (needMPU) {
         if (mpu9150_) {
             ok &= mpu9150_->read();
             mpuRead = true;
@@ -81,51 +79,51 @@ bool SensorHub::read(SensorScaled& out) {
                 out.mz_uT = mpu9150_->mz_uT();
             }
             if (tempSrc_ == TempSrc::MPU9150) {
-                out.temperature_C = mpu9150_->temp_C(); // <— FALLBACK temp when no baro
+                out.temperature_C = mpu9150_->temp_C(); // Die temperature (fallback if no baro)
             }
         } else {
-            ok = false;
+            ok = false; // Selected MPU9150 but it's not available
         }
     }
 
-    // ---- Gyro from L3GD20H ----
+    // ----- External gyro (L3GD20H) -----
     if (gyroSrc_ == GyroSrc::L3GD20H) {
         if (l3gd20h_) {
-            float gx, gy, gz;
-            ok &= l3gd20h_->read(gx, gy, gz);
-            out.gx_dps = gx; out.gy_dps = gy; out.gz_dps = gz;
+            float x,y,z;
+            ok &= l3gd20h_->read(x,y,z);
+            out.gx_dps = x; out.gy_dps = y; out.gz_dps = z;
         } else {
             ok = false;
         }
     }
 
-    // ---- Accel + Mag from LSM303D (read only if selected) ----
+    // ----- External accel/mag (LSM303D) -----
     if (accelSrc_ == AccelSrc::LSM303D) {
         if (lsm303d_) {
-            float ax, ay, az;
-            ok &= lsm303d_->readAccel(ax, ay, az);
-            out.ax_g = ax; out.ay_g = ay; out.az_g = az;
+            float x,y,z;
+            ok &= lsm303d_->readAccel(x,y,z);
+            out.ax_g = x; out.ay_g = y; out.az_g = z;
         } else {
             ok = false;
         }
     }
     if (magSrc_ == MagSrc::LSM303D) {
         if (lsm303d_) {
-            float mx, my, mz;
-            ok &= lsm303d_->readMag(mx, my, mz);
-            out.mx_uT = mx; out.my_uT = my; out.mz_uT = mz;
+            float x,y,z;
+            ok &= lsm303d_->readMag(x,y,z);
+            out.mx_uT = x; out.my_uT = y; out.mz_uT = z;
         } else {
             ok = false;
         }
     }
 
-    // ---- Baro + Temp from LPS25H (Temp preferred when available) ----
+    // ----- Barometer + ambient temperature (LPS25H) -----
     if (baroSrc_ == BaroSrc::LPS25H || tempSrc_ == TempSrc::LPS25H) {
         if (lps25h_) {
-            float p, tc;
-            ok &= lps25h_->read(p, tc);
+            float p, t;
+            ok &= lps25h_->read(p, t);
             if (baroSrc_ == BaroSrc::LPS25H) out.pressure_Pa = p;
-            if (tempSrc_ == TempSrc::LPS25H) out.temperature_C = tc; // <— AMBIENT temp
+            if (tempSrc_ == TempSrc::LPS25H) out.temperature_C = t;
         } else {
             ok = false;
         }
@@ -134,61 +132,36 @@ bool SensorHub::read(SensorScaled& out) {
     return ok;
 }
 
-/** @brief Choose gyro source per availability and preference. */
+// ----- source selection -------------------------------------------------------
+
 void SensorHub::chooseGyroSource() {
-    // Prefer external gyro if requested and available
-    if (Config::Select::PreferExternalGyro && l3gd20h_) {
-        gyroSrc_ = GyroSrc::L3GD20H;
-    } else if (mpu9150_) {
-        gyroSrc_ = GyroSrc::MPU9150;
-    } else if (l3gd20h_) {
-        gyroSrc_ = GyroSrc::L3GD20H;
-    } else {
-        gyroSrc_ = GyroSrc::None;
-    }
+    if (Config::Select::PreferExternalGyro && l3gd20h_)       { gyroSrc_ = GyroSrc::L3GD20H; return; }
+    if (mpu9150_)                                             { gyroSrc_ = GyroSrc::MPU9150; return; }
+    if (l3gd20h_)                                             { gyroSrc_ = GyroSrc::L3GD20H; return; }
+    gyroSrc_ = GyroSrc::None;
 }
 
-/** @brief Choose accelerometer source per availability and preference. */
 void SensorHub::chooseAccelSource() {
-    if (Config::Select::PreferExternalAccel && lsm303d_) {
-        accelSrc_ = AccelSrc::LSM303D;
-    } else if (mpu9150_) {
-        accelSrc_ = AccelSrc::MPU9150;
-    } else if (lsm303d_) {
-        accelSrc_ = AccelSrc::LSM303D;
-    } else {
-        accelSrc_ = AccelSrc::None;
-    }
+    if (Config::Select::PreferExternalAccel && lsm303d_)      { accelSrc_ = AccelSrc::LSM303D; return; }
+    if (mpu9150_)                                             { accelSrc_ = AccelSrc::MPU9150; return; }
+    if (lsm303d_)                                             { accelSrc_ = AccelSrc::LSM303D; return; }
+    accelSrc_ = AccelSrc::None;
 }
 
-/** @brief Choose magnetometer source per availability and preference. */
 void SensorHub::chooseMagSource() {
-    if (Config::Select::PreferExternalMag && lsm303d_) {
-        magSrc_ = MagSrc::LSM303D;
-    } else if (mpu9150_) {
-        magSrc_ = MagSrc::MPU9150;
-    } else if (lsm303d_) {
-        magSrc_ = MagSrc::LSM303D;
-    } else {
-        magSrc_ = MagSrc::None;
-    }
+    if (Config::Select::PreferExternalMag && lsm303d_)        { magSrc_ = MagSrc::LSM303D; return; }
+    if (mpu9150_)                                             { magSrc_ = MagSrc::MPU9150; return; }
+    if (lsm303d_)                                             { magSrc_ = MagSrc::LSM303D; return; }
+    magSrc_ = MagSrc::None;
 }
 
-/** @brief Choose barometer source (only LPS25H currently). */
 void SensorHub::chooseBaroSource() {
-    if (lps25h_) baroSrc_ = BaroSrc::LPS25H;
-    else         baroSrc_ = BaroSrc::None;
+    if (lps25h_)                                              { baroSrc_ = BaroSrc::LPS25H; return; }
+    baroSrc_ = BaroSrc::None;
 }
 
-/**
- * @brief Choose temperature source: prefer ambient from baro if present, else IMU die temp.
- *
- * Rationale:
- * - LPS25H provides ambient; best for environment/logging.
- * - MPU9150 die temp is available even without a baro; useful fallback.
- */
 void SensorHub::chooseTempSource() {
-    if (lps25h_)      tempSrc_ = TempSrc::LPS25H;
-    else if (mpu9150_) tempSrc_ = TempSrc::MPU9150;
-    else               tempSrc_ = TempSrc::None;
+    if (lps25h_)                                              { tempSrc_ = TempSrc::LPS25H; return; } // Ambient preferred
+    if (mpu9150_)                                             { tempSrc_ = TempSrc::MPU9150; return; } // Fallback: IMU die
+    tempSrc_ = TempSrc::None;
 }
