@@ -9,12 +9,12 @@ static constexpr unsigned I2C_CLOCK_HZ = 400000; // 400 kHz
 
 // Enable flags
 namespace Enable {
-    static constexpr bool MPU9150 = 1; // set true to use MPU9150 combo IMU
+    static constexpr bool MPU9150 = 0; // set true to use MPU9150 combo IMU
 
     // ST discrete sensors
-    static constexpr bool L3GD20H = 0;  // Gyro
-    static constexpr bool LSM303D = 0;  // Accel + Mag
-    static constexpr bool LPS25H  = 0;  // Baro + Temp
+    static constexpr bool L3GD20H = 1;  // Gyro
+    static constexpr bool LSM303D = 1;  // Accel + Mag
+    static constexpr bool LPS25H  = 1;  // Baro + Temp
 }
 
 // I2C addresses
