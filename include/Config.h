@@ -5,7 +5,7 @@
 
 namespace Config {
     // Target sample rate for printing raw values (Hz)
-    static constexpr unsigned SAMPLE_RATE_HZ = 800;
+    static constexpr unsigned SAMPLE_RATE_HZ = 1000;
 
     // I2C bus parameters
     static constexpr unsigned I2C_CLOCK_HZ = 400000; // 400 kHz default

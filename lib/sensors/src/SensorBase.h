@@ -3,26 +3,29 @@
 #include "Bus.h"
 
 /**
- * @brief Common base class for all sensors.
+ * @brief Common base class for all sensors (driver abstraction).
  *
- * Adds both raw and scaled accessors so the fusion core can choose.
- * Scaled units:
- *  - Gyro: degrees per second (dps)
- *  - Accel: Gs
- *  - Mag: microtesla (uT)
- *  - Temp: deg C
+ * Interaction:
+ * - Application / fusion layer talks ONLY to this interface.
+ * - Concrete drivers (e.g., MPU9150) own device-specific config but expose:
+ *   - Raw readings (register counts)
+ *   - Scaled readings in physical units (g, dps, uT, °C)
+ *   - The configured sample rate via sampleRateHz() so the app/fusion can schedule work.
  */
 class SensorBase {
 public:
     virtual ~SensorBase() = default;
 
-    /** Initialize sensor (after Bus.begin()). */
+    /** @brief Initialize the device (after Bus.begin()). */
     virtual bool begin() = 0;
 
-    /** Read latest sample into internal cache. */
+    /** @brief Read the latest sample into the internal cache. */
     virtual bool read() = 0;
 
-    // ----- Raw (register counts) -----
+    /** @brief The driver’s configured output data rate (Hz) for accel/gyro. */
+    virtual uint16_t sampleRateHz() const = 0;
+
+    // --- Raw (register counts) ---
     virtual int16_t rawAx() const = 0;
     virtual int16_t rawAy() const = 0;
     virtual int16_t rawAz() const = 0;
@@ -37,7 +40,7 @@ public:
 
     virtual int16_t rawTemp() const = 0;
 
-    // ----- Scaled -----
+    // --- Scaled (physical units) ---
     virtual float ax_g()  const = 0;
     virtual float ay_g()  const = 0;
     virtual float az_g()  const = 0;
@@ -46,9 +49,9 @@ public:
     virtual float gy_dps() const = 0;
     virtual float gz_dps() const = 0;
 
-    virtual float mx_uT() const = 0;
-    virtual float my_uT() const = 0;
-    virtual float mz_uT() const = 0;
+    virtual float mx_uT()  const = 0;
+    virtual float my_uT()  const = 0;
+    virtual float mz_uT()  const = 0;
 
     virtual float temp_C() const = 0;
 };
