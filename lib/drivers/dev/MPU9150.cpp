@@ -172,20 +172,24 @@ bool MPU9150::read() {
     _gy   = toInt16(buf[10], buf[11]);
     _gz   = toInt16(buf[12], buf[13]);
     computeScaledIMU();
+    { uint32_t now = micros(); triggerMagIfDue(now); }
 
     const uint32_t now = micros();
     triggerMagIfDue(now);
     if (_magPresent) {
         uint8_t m[8] = {0};
-        if (readBlock(_mpu, REG_EXT_SENS_DATA_00, m, sizeof(m))) {
-            if (m[0] & 0x01) {
-                _mx = toInt16(m[2], m[1]);
-                _my = toInt16(m[4], m[3]);
-                _mz = toInt16(m[6], m[5]);
-                computeScaledMag(_mx, _my, _mz);
+        uint8_t st1 = 0;
+            if (_bus.readRegisters(_mag, AK_REG_ST1, &st1, 1) && (st1 & 0x01)) {
+                uint8_t raw[6] = {0};
+                if (_bus.readRegisters(_mag, AK_REG_HXL, raw, 6)) {
+                    _mx = toInt16(raw[1], raw[0]);
+                    _my = toInt16(raw[3], raw[2]);
+                    _mz = toInt16(raw[5], raw[4]);
+                    uint8_t st2 = 0; (void)_bus.readRegisters(_mag, AK_REG_ST2, &st2, 1);
+                    if ((st2 & 0x08) == 0) { computeScaledMag(_mx, _my, _mz); }
+                }
             }
-        }
-    } else {
+} else {
         _mx = _my = _mz = 0;
         _mx_uT = _my_uT = _mz_uT = 0.0f;
     }
