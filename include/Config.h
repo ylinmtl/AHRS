@@ -22,9 +22,9 @@ namespace Config {
      */
     namespace Enable {
         static constexpr bool MPU9150 = 1;  // InvenSense IMU + internal AK8975 mag
-        static constexpr bool L3GD20H = 0;  // ST gyro
-        static constexpr bool LSM303D = 0;  // ST accel + mag
-        static constexpr bool LPS25H  = 0;  // ST baro + temp
+        static constexpr bool L3GD20H = 1;  // ST gyro
+        static constexpr bool LSM303D = 1;  // ST accel + mag
+        static constexpr bool LPS25H  = 1;  // ST baro + temp
     }
 
     /**

@@ -45,7 +45,7 @@ bool SensorHub::begin() {
  */
 bool SensorHub::read(SensorScaled& out) {
     bool ok = true;              // Accumulates overall success
-    bool mpuRead = false;        // Tracks whether we already called mpu9150_->read()
+    // bool mpuRead = false;        // (unused) previously tracked MPU9150 read once per loop
 
     // Initialize "optional" channels to NAN so missing sensors are explicit.
     out.pressure_Pa   = NAN;
@@ -61,7 +61,7 @@ bool SensorHub::read(SensorScaled& out) {
     if (needMPU) {
         if (mpu9150_) {
             ok &= mpu9150_->read();
-            mpuRead = true;
+            // mpuRead removed; MPU read called once per path
 
             if (gyroSrc_ == GyroSrc::MPU9150) {
                 out.gx_dps = mpu9150_->gx_dps();
