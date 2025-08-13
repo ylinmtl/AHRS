@@ -1,5 +1,8 @@
 #include "MPU9150.h"
 
+namespace { inline bool kBypass() { return true; } static constexpr uint32_t kMagRateHz = 10; }
+
+
 bool MPU9150::readBlock(uint8_t dev, uint8_t reg, uint8_t* buf, size_t len) {
     return _bus.readRegisters(dev, reg, buf, len);
 }
@@ -78,24 +81,28 @@ bool MPU9150::slv4ReadBlocking(uint8_t dev, uint8_t reg, uint8_t& data, uint32_t
 }
 
 bool MPU9150::readASA() {
-    slv4WriteBlocking(_mag, AK_REG_CNTL, AK_MODE_POWERDOWN, 2000);
-    slv4WriteBlocking(_mag, AK_REG_CNTL, AK_MODE_FUSEROM,   2000);
+    if (!_magPresent) return false;
+    _bus.writeRegister(_mag, AK_REG_CNTL, AK_MODE_POWERDOWN);
+    delayMicroseconds(100);
+    _bus.writeRegister(_mag, AK_REG_CNTL, AK_MODE_FUSEROM);
+    delayMicroseconds(100);
     uint8_t asax=128, asay=128, asaz=128;
-    slv4ReadBlocking(_mag, AK_REG_ASAX, asax, 2000);
-    slv4ReadBlocking(_mag, AK_REG_ASAY, asay, 2000);
-    slv4ReadBlocking(_mag, AK_REG_ASAZ, asaz, 2000);
-    slv4WriteBlocking(_mag, AK_REG_CNTL, AK_MODE_POWERDOWN, 2000);
-    auto adj = [](uint8_t ASA)->float { return ((float)ASA - 128.0f) * 0.5f / 128.0f + 1.0f; };
+    _bus.readRegisters(_mag, AK_REG_ASAX, &asax, 1);
+    _bus.readRegisters(_mag, AK_REG_ASAY, &asay, 1);
+    _bus.readRegisters(_mag, AK_REG_ASAZ, &asaz, 1);
+    _bus.writeRegister(_mag, AK_REG_CNTL, AK_MODE_POWERDOWN);
+    auto adj = [](uint8_t ASA)->float { return ((float)ASA - 128.0f) * 0.5f / 128.0f + 1.0f; }
+;
     _asaAdjX = adj(asax); _asaAdjY = adj(asay); _asaAdjZ = adj(asaz);
     return true;
 }
 
 void MPU9150::triggerMagIfDue(uint32_t now_us) {
-    const uint32_t period_us = 12000; // ~83 Hz nominal
+    const uint32_t period_us = 1000000UL / kMagRateHz;
     if (!_magPresent || (uint32_t)(now_us - _lastMagTrigUs) < period_us) return;
     _lastMagTrigUs = now_us;
-    slv4WriteBlocking(_mag, AK_REG_CNTL, AK_MODE_POWERDOWN, 2000);
-    slv4WriteBlocking(_mag, AK_REG_CNTL, AK_MODE_SINGLE,    2000);
+    _bus.writeRegister(_mag, AK_REG_CNTL, AK_MODE_POWERDOWN);
+    _bus.writeRegister(_mag, AK_REG_CNTL, AK_MODE_SINGLE);
 }
 
 void MPU9150::computeScaledIMU() {
@@ -121,30 +128,40 @@ bool MPU9150::begin() {
     // WHO_AM_I check
     uint8_t who = 0;
     if (!readBlock(_mpu, 0x75, &who, 1)) return false;
-    if (who != 0x68) return false;
+    if (who != 0x68 && who != 0x69) return false;
 
     // Reset and wake
     if (!_bus.writeRegister(_mpu, REG_PWR_MGMT_1, 0x80)) return false;
     delay(100);
-    if (!_bus.writeRegister(_mpu, REG_PWR_MGMT_1, 0x01)) return false;
+    if (!_bus.writeRegister(_mpu, REG_PWR_MGMT_1, 0x03)) return false; // PLL Z-gyro clock
     delay(10);
 
     // Ranges
     if (!_bus.writeRegister(_mpu, REG_GYRO_CONFIG,  (3 << 3))) return false; // ±2000 dps
     if (!_bus.writeRegister(_mpu, REG_ACCEL_CONFIG, (3 << 3))) return false; // ±16 g
 
-    // Sample rate
+    // Sample rate / DLPF
     if (!configureSampleRateFromDriver()) return false;
 
-    // Internal I2C master and mag
-    if (!enableI2CMaster()) return false;
-    _magPresent = probeMagWIA();
-    if (_magPresent) { readASA(); setupMagStream(); }
-    _lastMagTrigUs = micros();
+    // BYPASS mode: talk to AK8975 directly
+    _bus.writeRegister(_mpu, REG_USER_CTRL, 0x00);   // disable master
+    _bus.writeRegister(_mpu, REG_INT_PIN_CFG, 0x02); // BYPASS_EN
+
+    uint8_t wia = 0;
+    _magPresent = _bus.readRegisters(_mag, AK_REG_WIA, &wia, 1) && (wia == 0x48);
+    (void)readASA(); // uses direct I2C when BYPASS
+
     return true;
 }
 
 bool MPU9150::read() {
+    // Gate on DATA_RDY to avoid mid-update bursts
+    { uint8_t isr=0; uint32_t t0=micros();
+      while ((uint32_t)(micros()-t0) < 1000) {
+        if (_bus.readRegisters(_mpu, 0x3A, &isr, 1) && (isr & 0x01)) break;
+      }
+    }
+
     uint8_t buf[14];
     if (!readBlock(_mpu, REG_ACCEL_XOUT_H, buf, sizeof(buf))) return false;
     _ax   = toInt16(buf[0],  buf[1]);
